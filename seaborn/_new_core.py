@@ -1,24 +1,40 @@
 from __future__ import annotations
-from pandas import DataFrame
+from typing import Union, Optional
+from collections.abc import Hashable, Sequence, Mapping
+from numbers import Number
+
+import numpy as np
+from numpy import ndarray
+import pandas as pd
+from pandas import DataFrame, Series
+
+
+Vector = Union[Series, ndarray, Sequence, Number]
+
+# TODO Should we define a DataFrame-like type that is Union[DataFrame, Mapping]?
 
 
 class Plot:
 
-    def __init__(self, data=None, **variables):
+    def __init__(
+        self,
+        data: Optional[Union[DataFrame, Mapping]] = None,
+        **variables: Union[Hashable, Vector],
+    ):
 
         # Note that we can't assume wide-form here if variables does not contain x or y
         # because those might get assigned in long-form fashion per layer.
 
         self.data = DataSource(data, variables)
-        self.layers = []
+        self.layers: list[Layer] = []
 
     def add(
         self,
         mark: Mark,
         stat: Stat = None,
-        data: DataFrame = None,
-        variables: dict[str, str] = None,
-    ):
+        data: Union[DataFrame, Mapping, None] = None,
+        variables: dict[str, Union[Hashable, Vector, None]] = None,
+    ) -> Plot:
 
         # TODO what if in wide-form mode, we convert to long-form
         # based on the transform that mark defines?
@@ -29,18 +45,22 @@ class Plot:
 
         self.layers.append(Layer(data, mark, stat))
 
-    def plot(self):
+        return self
+
+    def plot(self) -> Plot:
 
         # TODO or something like this
         for layer in self.layers:
-            layer.plot()
+            self._plot_layer(layer)
 
-    def _plot_layer(self):
+        return self
+
+    def _plot_layer(self, layer):
 
         # Roughly ...
 
         # TODO where does this method come from?
-        data = self.as_numeric(self.data)
+        data = self.as_numeric(layer.data)
 
         # TODO who owns the groupby logic?
         data = self.stat(data)
@@ -51,9 +71,9 @@ class Plot:
         data = self.invert_scale(data)
 
         # Something like this?
-        self.mark.plot(data)  # do we pass ax (and/or facets?! here?)
+        layer.mark.plot(data)  # do we pass ax (and/or facets?! here?)
 
-    def show(self):
+    def show(self) -> Plot:
 
         # TODO guard this here?
         # We could have the option to be totally pyplot free
@@ -62,13 +82,17 @@ class Plot:
         self.plot()
         plt.show()
 
-    def save(self):  # or to_file or similar to match pandas?
+        return self
 
-        pass
+    def save(self) -> Plot:  # or to_file or similar to match pandas?
 
-    def _repr_html_(self):
+        return self
 
-        pass
+    def _repr_html_(self) -> str:
+
+        html = ""
+
+        return html
 
 
 # Do we want some sort of generator that yields a tuple of (semantics, data,
@@ -93,7 +117,8 @@ class DataSource:
 
     # I guess more generally, what to do when different variables are assigned in
     # different calls to Plot.add()? This has to be possible (otherwise why allow it)?
-    # What does ggplot do here?
+    # ggplot allows you to do this but only uses the first layer for labels, and only
+    # if the scales are compatible.
 
     # Who owns the existing VectorPlotter.variables, VectorPlotter.var_levels, etc.?
 
@@ -113,15 +138,21 @@ class Stat:
 
 class Mark:
 
+    # TODO will subclasses overwrite this? Should this be defined elsewhere?
+    group_vars: list[str] = ["col", "row", "group"]
+
+    default_stat: Optional[Stat] = None  # TODO or identity?
+
     pass
 
 
 class Point(Mark):
 
-    def plot(self):
+    def _plot(self, data_gen):  # TODO data_gen is maybe too restrictive a name?
 
-        # TODO how do we end up with ax, data, etc?
-        pass
+        for keys, data, ax in data_gen(self.group_vars):
+
+            pass
 
 
 class Layer:
@@ -129,7 +160,7 @@ class Layer:
     # Does this need to be anything other than a simple container for these attributes?
     # Could use a Dataclass I guess?
 
-    def __init__(self, data: DataSource, mark: Mark, stat: Stat):
+    def __init__(self, data: DataSource, mark: Mark, stat: Stat = None):
 
         self.data = data
         self.mark = mark
