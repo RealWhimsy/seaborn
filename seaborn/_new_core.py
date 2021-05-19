@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Union, Optional
-from collections.abc import Hashable, Sequence, Mapping
+from collections.abc import Hashable, Sequence, Mapping, Sized
 from numbers import Number
 
 import numpy as np
@@ -17,6 +17,9 @@ Vector = Union[Series, ndarray, Sequence, Number]
 
 class Plot:
 
+    data: DataSet  # TODO possibly should be private?
+    layers: list[Layer]  # TODO probably should be private?
+
     def __init__(
         self,
         data: Optional[Union[DataFrame, Mapping]] = None,
@@ -26,8 +29,8 @@ class Plot:
         # Note that we can't assume wide-form here if variables does not contain x or y
         # because those might get assigned in long-form fashion per layer.
 
-        self.data = DataSource(data, variables)
-        self.layers: list[Layer] = []
+        self.data = DataSet(data, variables)
+        self.layers = []
 
     def add(
         self,
@@ -39,7 +42,7 @@ class Plot:
 
         # TODO what if in wide-form mode, we convert to long-form
         # based on the transform that mark defines?
-        data = DataSource(data, variables).join(self.data)
+        data = self.data.update(data, variables)
 
         if stat is None:
             stat = mark.default_stat
@@ -50,6 +53,10 @@ class Plot:
 
     # TODO problem with "draw" meaning something specific in mpl?
     def draw(self) -> Plot:
+
+        # TODO one option is to loop over the layers here and use them to
+        # initialize and scaling/mapping we need to do (using parameters)
+        # possibly previously set and stored through calls to map_hue etc.
 
         # TODO or something like this
         for layer in self.layers:
@@ -107,7 +114,7 @@ class Plot:
 # stat?)
 
 
-class DataSource:
+class DataSet:  # TODO better name?
 
     # How to handle wide-form data here, when the dimensional semantics are defined by
     # the mark? (I guess? that will be most consistent with how it currently works.)
@@ -124,54 +131,79 @@ class DataSource:
 
     # Who owns the existing VectorPlotter.variables, VectorPlotter.var_levels, etc.?
 
+    frame: DataFrame
+    names: dict[str, Optional[str]]
+    _source: Optional[Union[DataFrame, Mapping]]
+
     def __init__(
         self,
-        data: Union[DataFrame, Mapping, None],
-        variables: dict[str, Union[str, Vector]],
+        data: Optional[Union[DataFrame, Mapping]],
+        variables: Optional[dict[str, Union[str, Vector]]],
         # TODO pass in wide semantics?
     ):
 
+        if variables is None:
+            variables = {}
+
         # TODO only specing out with long-form data for now...
-        data, names = self._assign_variables_longform(data, variables)
+        frame, names = self._assign_variables_longform(data, variables)
 
-        self._data = data
-        self._names = names
+        self.orig = data
+        self.frame = frame
+        self.names = names
 
-    def join(self, other: DataSource) -> None:  # TODO return self?
-
-        # TODO Define this as a left join I guess
+    def update(
+        self,
+        data: Optional[Union[DataFrame, Mapping]],
+        variables: Optional[dict[str, Union[str, Vector]]],
+    ) -> DataSet:
 
         # TODO If the idea is that the layer-specific data source will be on the
         # left, then we can essentially do an update with other's plot_data and
         # var names. But that is tricky because each layer will rarely (probably)
         # define x/y, meaning that naively we would think we have wide-form data
 
-        # TODO also we need to account for when we just get names at the layer
-        # and they reference fields in the original data. Maybe the signature
-        # here should chance to data, variables? (But that would reverse the
-        # assumed order of what is self and what is other)
-
         # TODO also, we want to be able to disable global semantics by passing None
         # here, which probably needs special handling as currently we'll end up
         # with a column of Nones which is otherwise gonna get us in trouble...
 
-        data = (
-            self._data
-            .drop(other._data.columns, axis=1)
-            .join(other._data, how="left", copy=False)  # TODO check copy
+        # Inherit the original source of the data
+        if data is None:
+            data = self._source
+
+        # Passing var=None implies that we do not want that variable in this layer
+        drop_cols = []
+        new_variables = {}
+        for key, val in variables.items():
+            if val is None:
+                drop_cols.append(key)
+            else:
+                new_variables[key] = val
+
+        # Create a new dataset with just the info passed here
+        new = DataSet(data, new_variables)
+
+        # Update the inherited DataFrame and names with this new information
+        names = {k: v for k, v in self.names.items() if k not in drop_cols}
+        names.update(new.names)
+
+        drop_cols += new.frame.columns.to_list()
+        frame = (
+            self.frame
+            .drop(drop_cols, axis=1, errors="ignore")
+            .join(new.frame, how="left")
         )
 
-        names = self._names.copy()
-        names.update(other._names)
+        new.frame = frame
+        new.names = names
 
-        self._data = data
-        self._names = names
+        return new
 
     def _assign_variables_longform(
         self,
-        data: Union[DataFrame, Mapping, None],
+        data: Optional[Union[DataFrame, Mapping]],
         variables: dict[str, Union[str, Vector]]
-    ) -> tuple[DataFrame, dict[str, Union[str, None]]]:
+    ) -> tuple[DataFrame, dict[str, Optional[str]]]:
         """Define plot variables given long-form data and/or vector inputs.
 
         Parameters
@@ -185,10 +217,10 @@ class DataSource:
 
         Returns
         -------
-        plot_data : :class:`pandas.DataFrame`
+        frame
             Long-form data object mapping seaborn variables (x, y, hue, ...)
             to data vectors.
-        variables : dict
+        names
             Keys are defined seaborn variables; values are names inferred from
             the inputs (or None when no name can be determined).
 
@@ -211,7 +243,7 @@ class DataSource:
         # want, whereas DataFrame.to_dict() gives a nested dict instead of
         # a dict of series.
 
-        # Variables can also be extraced from the index attribute
+        # Variables can also be extracted from the index attribute
         # TODO is this the most general way to enable it?
         # There is no index.to_dict on multiindex, unfortunately
         try:
@@ -219,7 +251,6 @@ class DataSource:
         except AttributeError:
             index = {}
 
-        # The caller will determine the order of variables in plot_data
         for key, val in variables.items():
 
             # First try to treat the argument as a key for the data collection.
@@ -243,9 +274,9 @@ class DataSource:
                     plot_data[key] = data[val]
                 elif val in index:
                     plot_data[key] = index[val]
-                var_names[key] = val
+                var_names[key] = str(val)
 
-            elif isinstance(val, (str, bytes)):
+            elif isinstance(val, str):
 
                 # This looks like a column name but we don't know what it means!
 
@@ -258,7 +289,7 @@ class DataSource:
 
                 # Raise when data object is present and a vector can't matched
                 if isinstance(data, pd.DataFrame) and not isinstance(val, pd.Series):
-                    if np.ndim(val) and len(data) != len(val):
+                    if isinstance(val, Sized) and len(data) != len(val):
                         val_cls = val.__class__.__name__
                         err = (
                             f"Length of {val_cls} vectors must match length of `data`"
@@ -274,16 +305,16 @@ class DataSource:
 
         # Construct a tidy plot DataFrame. This will convert a number of
         # types automatically, aligning on index in case of pandas objects
-        plot_data = pd.DataFrame(plot_data)
+        frame = pd.DataFrame(plot_data)
 
         # Reduce the variables dictionary to fields with valid data
-        var_names = {
+        names = {
             var: name
             for var, name in var_names.items()
             if plot_data[var].notnull().any()
         }
 
-        return plot_data, var_names
+        return frame, names
 
 
 class Stat:
@@ -356,7 +387,7 @@ class Layer:
     # Does this need to be anything other than a simple container for these attributes?
     # Could use a Dataclass I guess?
 
-    def __init__(self, data: DataSource, mark: Mark, stat: Stat = None):
+    def __init__(self, data: DataSet, mark: Mark, stat: Stat = None):
 
         self.data = data
         self.mark = mark
