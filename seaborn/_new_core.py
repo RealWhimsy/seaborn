@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Union, Optional, List, Dict, Tuple
+from typing import Any, Union, Optional, List, Dict, Tuple
 from collections.abc import Hashable, Sequence, Mapping, Sized
 from numbers import Number
 
@@ -232,17 +232,14 @@ class PlotData:  # TODO better name?
         if data is None:
             data = {}
 
-        # TODO should we try a data.to_dict() or similar here to more
-        # generally accept objects with that interface?
-        # Note that dict(df) also works for pandas, and gives us what we
-        # want, whereas DataFrame.to_dict() gives a nested dict instead of
-        # a dict of series.
+        # TODO Generally interested in accepting a generic DataFrame interface
+        # Track https://data-apis.org/ for development
 
-        # Variables can also be extracted from the index attribute
-        # TODO is this the most general way to enable it?
-        # There is no index.to_dict on multiindex, unfortunately
-        if hasattr(data, "index"):
-            index = data.index.to_frame()  # type: ignore # mypy/1424
+        # Variables can also be extracted from the index of a DataFrame
+        index: Dict[str, Any]
+        if isinstance(data, pd.DataFrame):
+            index = data.index.to_frame().to_dict(
+                "series")  # type: ignore  # data-sci-types wrong about to_dict return
         else:
             index = {}
 
@@ -254,8 +251,8 @@ class PlotData:  # TODO better name?
 
             # Try to treat the argument as a key for the data collection.
             # But be flexible about what can be used as a key.
-            # Usually it will be a string, but allow numbers or tuples too when
-            # taking from the main data object. Only allow strings to reference
+            # Usually it will be a string, but allow other hashables when
+            # taking from the main data object. Allow only strings to reference
             # fields in the index, because otherwise there is too much ambiguity.
             try:
                 val_as_data_key = (
@@ -267,8 +264,6 @@ class PlotData:  # TODO better name?
 
             if val_as_data_key:
 
-                # We know that __getitem__ will work
-
                 if val in data:
                     plot_data[key] = data[val]  # type: ignore # fails on key: Hashable
                 elif val in index:
@@ -278,6 +273,9 @@ class PlotData:  # TODO better name?
             elif isinstance(val, str):
 
                 # This looks like a column name but we don't know what it means!
+                # TODO improve this feedback to distinguish between
+                # - "you passed a string, but did not pass data"
+                # - "you passed a string, it was not found in data"
 
                 err = f"Could not interpret value `{val}` for parameter `{key}`"
                 raise ValueError(err)
