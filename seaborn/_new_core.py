@@ -1,53 +1,54 @@
 from __future__ import annotations
-from typing import Union, Optional
+from typing import Union, Optional, List, Dict, Tuple
 from collections.abc import Hashable, Sequence, Mapping, Sized
 from numbers import Number
 
 import numpy as np
 from numpy import ndarray
 import pandas as pd
-from pandas import DataFrame, Series
+from pandas import DataFrame, Series, Index
 
 
 # TODO ndarray can be the numpy ArrayLike on 1.20+ (?)
-Vector = Union[Series, ndarray, Sequence, Number]
+# TODO pandas typing (from data-science-types?) doesn't like Number
+Vector = Union[Series, Index, ndarray, Sequence, Number]
 
 # TODO Should we define a DataFrame-like type that is Union[DataFrame, Mapping]?
 
 
 class Plot:
 
-    data: DataSet  # TODO possibly should be private?
-    layers: list[Layer]  # TODO probably should be private?
+    data: PlotData  # TODO possibly should be private?
+    layers: List[Layer]  # TODO probably should be private?
 
     def __init__(
         self,
         data: Optional[Union[DataFrame, Mapping]] = None,
-        **variables: Union[Hashable, Vector],
+        **variables: Optional[Union[Hashable, Vector]],
     ):
 
         # Note that we can't assume wide-form here if variables does not contain x or y
         # because those might get assigned in long-form fashion per layer.
 
-        self.data = DataSet(data, variables)
+        self.data = PlotData(data, variables)
         self.layers = []
 
     def add(
         self,
         mark: Mark,
         stat: Stat = None,
-        data: Union[DataFrame, Mapping, None] = None,
-        variables: dict[str, Union[Hashable, Vector, None]] = None,
+        data: Optional[Union[DataFrame, Mapping]] = None,
+        variables: Optional[Dict[str, Optional[Union[Hashable, Vector]]]] = None,
     ) -> Plot:
 
         # TODO what if in wide-form mode, we convert to long-form
         # based on the transform that mark defines?
-        data = self.data.update(data, variables)
+        layer_data = self.data.update(data, variables)
 
         if stat is None:
             stat = mark.default_stat
 
-        self.layers.append(Layer(data, mark, stat))
+        self.layers.append(Layer(layer_data, mark, stat))
 
         return self
 
@@ -114,7 +115,7 @@ class Plot:
 # stat?)
 
 
-class DataSet:  # TODO better name?
+class PlotData:  # TODO better name?
 
     # How to handle wide-form data here, when the dimensional semantics are defined by
     # the mark? (I guess? that will be most consistent with how it currently works.)
@@ -132,13 +133,13 @@ class DataSet:  # TODO better name?
     # Who owns the existing VectorPlotter.variables, VectorPlotter.var_levels, etc.?
 
     frame: DataFrame
-    names: dict[str, Optional[str]]
+    names: Dict[str, Optional[str]]
     _source: Optional[Union[DataFrame, Mapping]]
 
     def __init__(
         self,
         data: Optional[Union[DataFrame, Mapping]],
-        variables: Optional[dict[str, Union[str, Vector]]],
+        variables: Optional[Dict[str, Union[Hashable, Vector]]],
         # TODO pass in wide semantics?
     ):
 
@@ -148,51 +149,45 @@ class DataSet:  # TODO better name?
         # TODO only specing out with long-form data for now...
         frame, names = self._assign_variables_longform(data, variables)
 
-        self.orig = data
         self.frame = frame
         self.names = names
+        self._source = data
 
     def update(
         self,
         data: Optional[Union[DataFrame, Mapping]],
-        variables: Optional[dict[str, Union[str, Vector]]],
-    ) -> DataSet:
+        variables: Optional[Dict[str, Union[Hashable, Vector]]],
+    ) -> PlotData:
 
-        # TODO If the idea is that the layer-specific data source will be on the
-        # left, then we can essentially do an update with other's plot_data and
-        # var names. But that is tricky because each layer will rarely (probably)
-        # define x/y, meaning that naively we would think we have wide-form data
+        # TODO name-wise, does update imply an inplace operation in a confusing way?
 
-        # TODO also, we want to be able to disable global semantics by passing None
-        # here, which probably needs special handling as currently we'll end up
-        # with a column of Nones which is otherwise gonna get us in trouble...
+        # TODO Note a tricky thing here which is that often x/y will be inherited
+        # meaning that the variable specification here will look like "wide-form"
 
-        # Inherit the original source of the data
+        # Inherit the original source of the upsteam data by default
         if data is None:
             data = self._source
 
+        if variables is None:
+            variables = {}
+
         # Passing var=None implies that we do not want that variable in this layer
-        drop_cols = []
-        new_variables = {}
-        for key, val in variables.items():
-            if val is None:
-                drop_cols.append(key)
-            else:
-                new_variables[key] = val
+        disinherit = [k for k, v in variables.items() if v is None]
 
         # Create a new dataset with just the info passed here
-        new = DataSet(data, new_variables)
+        new = PlotData(data, variables)
 
-        # Update the inherited DataFrame and names with this new information
-        names = {k: v for k, v in self.names.items() if k not in drop_cols}
-        names.update(new.names)
+        # -- Update the inherited DataFrame and names with this new information
 
-        drop_cols += new.frame.columns.to_list()
+        drop_cols = [k for k in self.frame if k in new.frame or k in disinherit]
         frame = (
             self.frame
-            .drop(drop_cols, axis=1, errors="ignore")
-            .join(new.frame, how="left")
+            .drop(columns=drop_cols)
+            .join(new.frame)  # type: ignore  # thinks frame.join is a Series??
         )
+
+        names = {k: v for k, v in self.names.items() if k not in disinherit}
+        names.update(new.names)
 
         new.frame = frame
         new.names = names
@@ -202,8 +197,8 @@ class DataSet:  # TODO better name?
     def _assign_variables_longform(
         self,
         data: Optional[Union[DataFrame, Mapping]],
-        variables: dict[str, Union[str, Vector]]
-    ) -> tuple[DataFrame, dict[str, Optional[str]]]:
+        variables: Dict[str, Optional[Union[Hashable, Vector]]]
+    ) -> Tuple[DataFrame, Dict[str, Optional[str]]]:
         """Define plot variables given long-form data and/or vector inputs.
 
         Parameters
@@ -230,8 +225,8 @@ class DataSet:  # TODO better name?
             When variables are strings that don't appear in ``data``.
 
         """
-        plot_data = {}
-        var_names = {}
+        plot_data: Dict[str, Vector] = {}
+        var_names: Dict[str, Optional[str]] = {}
 
         # Data is optional; all variables can be defined as vectors
         if data is None:
@@ -246,14 +241,18 @@ class DataSet:  # TODO better name?
         # Variables can also be extracted from the index attribute
         # TODO is this the most general way to enable it?
         # There is no index.to_dict on multiindex, unfortunately
-        try:
-            index = data.index.to_frame()
-        except AttributeError:
+        if hasattr(data, "index"):
+            index = data.index.to_frame()  # type: ignore # mypy/1424
+        else:
             index = {}
 
         for key, val in variables.items():
 
-            # First try to treat the argument as a key for the data collection.
+            # Simply ignore variables with no specification
+            if val is None:
+                continue
+
+            # Try to treat the argument as a key for the data collection.
             # But be flexible about what can be used as a key.
             # Usually it will be a string, but allow numbers or tuples too when
             # taking from the main data object. Only allow strings to reference
@@ -261,7 +260,7 @@ class DataSet:  # TODO better name?
             try:
                 val_as_data_key = (
                     val in data
-                    or (isinstance(val, (str, bytes)) and val in index)
+                    or (isinstance(val, str) and val in index)
                 )
             except (KeyError, TypeError):
                 val_as_data_key = False
@@ -271,9 +270,9 @@ class DataSet:  # TODO better name?
                 # We know that __getitem__ will work
 
                 if val in data:
-                    plot_data[key] = data[val]
+                    plot_data[key] = data[val]  # type: ignore # fails on key: Hashable
                 elif val in index:
-                    plot_data[key] = index[val]
+                    plot_data[key] = index[val]  # type: ignore # fails on key: Hashable
                 var_names[key] = str(val)
 
             elif isinstance(val, str):
@@ -298,20 +297,21 @@ class DataSet:  # TODO better name?
                         )
                         raise ValueError(err)
 
-                plot_data[key] = val
+                plot_data[key] = val  # type: ignore # fails on key: Hashable
 
                 # Try to infer the name of the variable
                 var_names[key] = getattr(val, "name", None)
 
         # Construct a tidy plot DataFrame. This will convert a number of
         # types automatically, aligning on index in case of pandas objects
-        frame = pd.DataFrame(plot_data)
+        frame = pd.DataFrame(plot_data)  # type: ignore # should allow dict[str, Number]
 
         # Reduce the variables dictionary to fields with valid data
-        names = {
+        names: Dict[str, Optional[str]] = {
             var: name
             for var, name in var_names.items()
-            if plot_data[var].notnull().any()
+            # TODO I am not sure that this is necessary any more
+            if frame[var].notnull().any()
         }
 
         return frame, names
@@ -325,7 +325,7 @@ class Stat:
 class Mark:
 
     # TODO will subclasses overwrite this? Should this be defined elsewhere?
-    group_vars: list[str] = ["col", "row", "group"]
+    group_vars: List[str] = ["col", "row", "group"]
 
     default_stat: Optional[Stat] = None  # TODO or identity?
 
@@ -387,7 +387,7 @@ class Layer:
     # Does this need to be anything other than a simple container for these attributes?
     # Could use a Dataclass I guess?
 
-    def __init__(self, data: DataSet, mark: Mark, stat: Stat = None):
+    def __init__(self, data: PlotData, mark: Mark, stat: Stat = None):
 
         self.data = data
         self.mark = mark
