@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Union, Optional, List, Dict, Tuple
+from typing import Any, Union, Optional
 from collections.abc import Hashable, Sequence, Mapping, Sized
 from numbers import Number
 
@@ -13,18 +13,19 @@ from pandas import DataFrame, Series, Index
 # TODO pandas typing (from data-science-types?) doesn't like Number
 Vector = Union[Series, Index, ndarray, Sequence, Number]
 
-# TODO Should we define a DataFrame-like type that is Union[DataFrame, Mapping]?
+# TODO Should we define a DataFrame-like type that is DataFrame | Mapping?
+# TODO same for variables ... these are repeated a lot.
 
 
 class Plot:
 
     data: PlotData  # TODO possibly should be private?
-    layers: List[Layer]  # TODO probably should be private?
+    layers: list[Layer]  # TODO probably should be private?
 
     def __init__(
         self,
-        data: Optional[Union[DataFrame, Mapping]] = None,
-        **variables: Optional[Union[Hashable, Vector]],
+        data: Optional[DataFrame | Mapping] = None,
+        **variables: Optional[Hashable | Vector],
     ):
 
         # Note that we can't assume wide-form here if variables does not contain x or y
@@ -37,8 +38,8 @@ class Plot:
         self,
         mark: Mark,
         stat: Stat = None,
-        data: Optional[Union[DataFrame, Mapping]] = None,
-        variables: Optional[Dict[str, Optional[Union[Hashable, Vector]]]] = None,
+        data: Optional[DataFrame | Mapping] = None,
+        variables: Optional[dict[str, Optional[Hashable | Vector]]] = None,
     ) -> Plot:
 
         # TODO what if in wide-form mode, we convert to long-form
@@ -52,8 +53,7 @@ class Plot:
 
         return self
 
-    # TODO problem with "draw" meaning something specific in mpl?
-    def draw(self) -> Plot:
+    def plot(self) -> Plot:
 
         # TODO one option is to loop over the layers here and use them to
         # initialize and scaling/mapping we need to do (using parameters)
@@ -61,11 +61,11 @@ class Plot:
 
         # TODO or something like this
         for layer in self.layers:
-            self._draw_layer(layer)
+            self._plot_layer(layer)
 
         return self
 
-    def _draw_layer(self, layer):
+    def _plot_layer(self, layer):
 
         # Roughly ...
 
@@ -81,7 +81,7 @@ class Plot:
         data = self.invert_scale(data)
 
         # Something like this?
-        layer.mark._draw(data)  # do we pass ax (and/or facets?! here?)
+        layer.mark._plot(data)  # do we pass ax (and/or facets?! here?)
 
     def show(self) -> Plot:
 
@@ -89,7 +89,7 @@ class Plot:
         # We could have the option to be totally pyplot free
         # in which case this method would raise
         import matplotlib.pyplot as plt
-        self.draw()
+        self.plot()
         plt.show()
 
         return self
@@ -133,13 +133,13 @@ class PlotData:  # TODO better name?
     # Who owns the existing VectorPlotter.variables, VectorPlotter.var_levels, etc.?
 
     frame: DataFrame
-    names: Dict[str, Optional[str]]
-    _source: Optional[Union[DataFrame, Mapping]]
+    names: dict[str, Optional[str]]
+    _source: Optional[DataFrame | Mapping]
 
     def __init__(
         self,
-        data: Optional[Union[DataFrame, Mapping]],
-        variables: Optional[Dict[str, Union[Hashable, Vector]]],
+        data: Optional[DataFrame | Mapping],
+        variables: Optional[dict[str, Hashable | Vector]],
         # TODO pass in wide semantics?
     ):
 
@@ -155,8 +155,8 @@ class PlotData:  # TODO better name?
 
     def update(
         self,
-        data: Optional[Union[DataFrame, Mapping]],
-        variables: Optional[Dict[str, Union[Hashable, Vector]]],
+        data: Optional[DataFrame | Mapping],
+        variables: Optional[dict[str, Optional[Hashable | Vector]]],
     ) -> PlotData:
 
         # TODO name-wise, does update imply an inplace operation in a confusing way?
@@ -177,13 +177,13 @@ class PlotData:  # TODO better name?
         # Create a new dataset with just the info passed here
         new = PlotData(data, variables)
 
-        # -- Update the inherited DataFrame and names with this new information
+        # -- Update the inherited DataSource with this new information
 
         drop_cols = [k for k in self.frame if k in new.frame or k in disinherit]
         frame = (
             self.frame
             .drop(columns=drop_cols)
-            .join(new.frame)  # type: ignore  # thinks frame.join is a Series??
+            .join(new.frame)  # type: ignore  # mypy thinks frame.join is a Series??
         )
 
         names = {k: v for k, v in self.names.items() if k not in disinherit}
@@ -196,10 +196,11 @@ class PlotData:  # TODO better name?
 
     def _assign_variables_longform(
         self,
-        data: Optional[Union[DataFrame, Mapping]],
-        variables: Dict[str, Optional[Union[Hashable, Vector]]]
-    ) -> Tuple[DataFrame, Dict[str, Optional[str]]]:
-        """Define plot variables given long-form data and/or vector inputs.
+        data: Optional[DataFrame | Mapping],
+        variables: dict[str, Optional[Hashable | Vector]]
+    ) -> tuple[DataFrame, dict[str, Optional[str]]]:
+        """
+        Define plot variables given long-form data and/or vector inputs.
 
         Parameters
         ----------
@@ -225,8 +226,8 @@ class PlotData:  # TODO better name?
             When variables are strings that don't appear in ``data``.
 
         """
-        plot_data: Dict[str, Vector] = {}
-        var_names: Dict[str, Optional[str]] = {}
+        plot_data: dict[str, Vector] = {}
+        var_names: dict[str, Optional[str]] = {}
 
         # Data is optional; all variables can be defined as vectors
         if data is None:
@@ -236,7 +237,7 @@ class PlotData:  # TODO better name?
         # Track https://data-apis.org/ for development
 
         # Variables can also be extracted from the index of a DataFrame
-        index: Dict[str, Any]
+        index: dict[str, Any]
         if isinstance(data, pd.DataFrame):
             index = data.index.to_frame().to_dict(
                 "series")  # type: ignore  # data-sci-types wrong about to_dict return
@@ -305,7 +306,7 @@ class PlotData:  # TODO better name?
         frame = pd.DataFrame(plot_data)  # type: ignore # should allow dict[str, Number]
 
         # Reduce the variables dictionary to fields with valid data
-        names: Dict[str, Optional[str]] = {
+        names: dict[str, Optional[str]] = {
             var: name
             for var, name in var_names.items()
             # TODO I am not sure that this is necessary any more
@@ -323,7 +324,7 @@ class Stat:
 class Mark:
 
     # TODO will subclasses overwrite this? Should this be defined elsewhere?
-    group_vars: List[str] = ["col", "row", "group"]
+    group_vars: list[str] = ["col", "row", "group"]
 
     default_stat: Optional[Stat] = None  # TODO or identity?
 
@@ -336,7 +337,7 @@ class Point(Mark):
 
         self.kwargs = kwargs
 
-    def _draw(self, plot):  # TODO data_gen is maybe too restrictive a name?
+    def _plot(self, plot):  # TODO data_gen is maybe too restrictive a name?
 
         kws = self.kwargs.copy()
 
