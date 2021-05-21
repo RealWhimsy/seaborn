@@ -1,17 +1,33 @@
 from __future__ import annotations
-from typing import Any, Union, Optional
+from typing import Any, Union, Optional, Literal
 from collections.abc import Hashable, Sequence, Mapping, Sized
 from numbers import Number
+from collections import UserString
+from datetime import datetime
+import warnings
 
 import numpy as np
 from numpy import ndarray
 import pandas as pd
 from pandas import DataFrame, Series, Index
+from pandas.api.types import is_categorical_dtype, is_numeric_dtype, is_datetime64_dtype
+import matplotlib as mpl
+from matplotlib.colors import Colormap, Normalize
+
+from .palettes import (
+    QUAL_PALETTES,
+    color_palette,
+)
+from .utils import (
+    get_color_cycle,
+    remove_na,
+)
 
 
 # TODO ndarray can be the numpy ArrayLike on 1.20+ (?)
-# TODO pandas typing (from data-science-types?) doesn't like Number
-Vector = Union[Series, Index, ndarray, Sequence, Number]
+Vector = Union[Series, Index, ndarray, Sequence]
+
+PaletteSpec = Optional[Union[str, list, dict, Colormap]]
 
 # TODO Should we define a DataFrame-like type that is DataFrame | Mapping?
 # TODO same for variables ... these are repeated a lot.
@@ -88,7 +104,7 @@ class Plot:
         # TODO guard this here?
         # We could have the option to be totally pyplot free
         # in which case this method would raise
-        import matplotlib.pyplot as plt
+        import matplotlib.pyplot as plt  # type: ignore
         self.plot()
         plt.show()
 
@@ -105,6 +121,7 @@ class Plot:
         return html
 
 
+# TODO
 # Do we want some sort of generator that yields a tuple of (semantics, data,
 # axes), or similar?  I guess this is basically the existing iter_data, although
 # currently the logic of getting the relevant axes lives externally (but makes
@@ -303,7 +320,7 @@ class PlotData:  # TODO better name?
 
         # Construct a tidy plot DataFrame. This will convert a number of
         # types automatically, aligning on index in case of pandas objects
-        frame = pd.DataFrame(plot_data)  # type: ignore # should allow dict[str, Number]
+        frame = pd.DataFrame(plot_data)
 
         # Reduce the variables dictionary to fields with valid data
         names: dict[str, Optional[str]] = {
@@ -391,3 +408,350 @@ class Layer:
         self.data = data
         self.mark = mark
         self.stat = stat
+
+
+class SemanticMapping:
+
+    pass
+
+
+class HueMapping(SemanticMapping):
+    """Mapping that sets artist colors according to data values."""
+
+    # TODO type the important class attributes here
+
+    def __init__(
+        self,
+        palette: Optional[PaletteSpec] = None,
+        order: Optional[list] = None,
+        norm: Optional[Normalize] = None,
+    ):
+
+        # TODO these should be "input_palette" or similar
+        self._input_palette = palette
+        self._input_order = order
+        self._input_norm = norm
+
+    def train(  # TODO ggplot name; let's come up with something better
+        self,
+        data: Series,
+    ) -> None:
+
+        palette: Optional[PaletteSpec] = self._input_palette
+        order: Optional[list] = self._input_order
+        norm: Optional[Normalize] = self._input_norm
+        cmap: Optional[Colormap] = None
+
+        # TODO these are currently extracted from a passed in plotter instance
+        # can we avoid doing that now that we are deferring the mapping?
+        input_format: Literal["long", "wide"] = "long"
+        var_type = None
+
+        if data.notna().any():
+
+            map_type = self.infer_map_type(palette, norm, input_format, var_type)
+
+            # Our goal is to end up with a dictionary mapping every unique
+            # value in `data` to a color. We will also keep track of the
+            # metadata about this mapping we will need for, e.g., a legend
+
+            # --- Option 1: numeric mapping with a matplotlib colormap
+
+            if map_type == "numeric":
+
+                data = pd.to_numeric(data)
+                levels, lookup_table, norm, cmap = self.numeric_mapping(
+                    data, palette, norm,
+                )
+
+            # --- Option 2: categorical mapping using seaborn palette
+
+            elif map_type == "categorical":
+
+                levels, lookup_table = self.categorical_mapping(
+                    data, palette, order,
+                )
+
+            # --- Option 3: datetime mapping
+
+            else:
+                # TODO this needs actual implementation
+                cmap = norm = None
+                levels, lookup_table = self.categorical_mapping(
+                    # Casting data to list to handle differences in the way
+                    # pandas and numpy represent datetime64 data
+                    list(data), palette, order,
+                )
+
+            self.map_type = map_type
+            self.lookup_table = lookup_table
+            self.palette = palette
+            self.levels = levels
+            self.norm = norm
+            self.cmap = cmap
+
+    def infer_map_type(
+        self,
+        palette: Optional[PaletteSpec],
+        norm: Optional[Normalize],
+        input_format: Literal["long", "wide"],
+        var_type: Optional[Literal["numeric", "categorical", "datetime"]],
+    ) -> Optional[Literal["numeric", "categorical", "datetime"]]:
+        """Determine how to implement the mapping."""
+        map_type: Optional[Literal["numeric", "categorical", "datetime"]]
+        if palette in QUAL_PALETTES:
+            map_type = "categorical"
+        elif norm is not None:
+            map_type = "numeric"
+        elif isinstance(palette, (dict, list)):
+            map_type = "categorical"
+        elif input_format == "wide":
+            map_type = "categorical"
+        else:
+            map_type = var_type
+
+        return map_type
+
+    def categorical_mapping(
+        self,
+        data: Series,
+        palette: Optional[PaletteSpec],
+        order: Optional[list],
+    ) -> tuple[list, dict]:
+        """Determine colors when the hue mapping is categorical."""
+        # -- Identify the order and name of the levels
+
+        levels = categorical_order(data, order)
+        n_colors = len(levels)
+
+        # -- Identify the set of colors to use
+
+        if isinstance(palette, dict):
+
+            missing = set(levels) - set(palette)
+            if any(missing):
+                err = "The palette dictionary is missing keys: {}"
+                raise ValueError(err.format(missing))
+
+            lookup_table = palette
+
+        else:
+
+            if palette is None:
+                if n_colors <= len(get_color_cycle()):
+                    colors = color_palette(None, n_colors)
+                else:
+                    colors = color_palette("husl", n_colors)
+            elif isinstance(palette, list):
+                if len(palette) != n_colors:
+                    err = "The palette list has the wrong number of colors."
+                    raise ValueError(err)
+                colors = palette
+            else:
+                colors = color_palette(palette, n_colors)
+
+            lookup_table = dict(zip(levels, colors))
+
+        return levels, lookup_table
+
+    def numeric_mapping(
+        self,
+        data: Series,
+        palette: Optional[PaletteSpec],
+        norm: Optional[Normalize],
+    ) -> tuple[list, dict, Optional[Normalize], Colormap]:
+        """Determine colors when the hue variable is quantitative."""
+        cmap: Colormap
+        if isinstance(palette, dict):
+
+            # The presence of a norm object overrides a dictionary of hues
+            # in specifying a numeric mapping, so we need to process it here.
+            levels = list(sorted(palette))
+            colors = [palette[k] for k in sorted(palette)]
+            cmap = mpl.colors.ListedColormap(colors)
+            lookup_table = palette.copy()
+
+        else:
+
+            # The levels are the sorted unique values in the data
+            levels = list(np.sort(remove_na(data.unique())))
+
+            # --- Sort out the colormap to use from the palette argument
+
+            # Default numeric palette is our default cubehelix palette
+            # TODO do we want to do something complicated to ensure contrast?
+            palette = "ch:" if palette is None else palette
+
+            if isinstance(palette, mpl.colors.Colormap):
+                cmap = palette
+            else:
+                cmap = color_palette(palette, as_cmap=True)
+
+            # Now sort out the data normalization
+            if norm is None:
+                norm = mpl.colors.Normalize()
+            elif isinstance(norm, tuple):
+                norm = mpl.colors.Normalize(*norm)
+            elif not isinstance(norm, mpl.colors.Normalize):
+                err = "``hue_norm`` must be None, tuple, or Normalize object."
+                raise ValueError(err)
+
+            if not norm.scaled():
+                norm(np.asarray(data.dropna()))
+
+            lookup_table = dict(zip(levels, cmap(norm(levels))))
+
+        return levels, lookup_table, norm, cmap
+
+
+# TODO do modern functions ever pass a type other than Series into this?
+# TODO "list" is too strict for order
+def categorical_order(vector: Vector, order: Optional[Vector] = None) -> list:
+    """
+    Return a list of unique data values using seaborn's ordering rules.
+
+    Determine an ordered list of levels in ``values``.
+
+    Parameters
+    ----------
+    vector : list, array, Categorical, or Series
+        Vector of "categorical" values
+    order : list-like, optional
+        Desired order of category levels to override the order determined
+        from the ``values`` object.
+
+    Returns
+    -------
+    order : list
+        Ordered list of category levels not including null values.
+
+    """
+    if order is None:
+
+        # TODO We don't have Categorical as part of our Vector type
+        # Do we really accept it? Is there a situation where we want to?
+        # NOTE: categorical_order gets called on inputs that are NOT meant as data
+
+        # if isinstance(vector, pd.Categorical):
+        #     order = vector.categories
+
+        if isinstance(vector, pd.Series):
+            if vector.dtype == "category":
+                order = vector.cat.categories
+            else:
+                order = vector.unique()
+        else:
+            order = pd.unique(vector)
+
+        if variable_type(vector) == "numeric":
+            order = np.sort(order)
+
+        order = filter(pd.notnull, order)
+    return list(order)
+
+
+class VarType(UserString):
+    """
+    Prevent comparisons elsewhere in the library from using the wrong name.
+
+    Errors are simple assertions because users should not be able to trigger
+    them. If that changes, they should be more verbose.
+
+    """
+    # TODO VarType is an awfully overloaded name, but so is DataType ...
+    allowed = "numeric", "datetime", "categorical"
+
+    def __init__(self, data):
+        assert data in self.allowed, data
+        super().__init__(data)
+
+    def __eq__(self, other):
+        assert other in self.allowed, other
+        return self.data == other
+
+
+def variable_type(
+    vector: Vector,
+    boolean_type: Literal["numeric", "categorical"] = "numeric",
+) -> VarType:
+    """
+    Determine whether a vector contains numeric, categorical, or datetime data.
+
+    This function differs from the pandas typing API in two ways:
+
+    - Python sequences or object-typed PyData objects are considered numeric if
+      all of their entries are numeric.
+    - String or mixed-type data are considered categorical even if not
+      explicitly represented as a :class:`pandas.api.types.CategoricalDtype`.
+
+    Parameters
+    ----------
+    vector : :func:`pandas.Series`, :func:`numpy.ndarray`, or Python sequence
+        Input data to test.
+    boolean_type : 'numeric' or 'categorical'
+        Type to use for vectors containing only 0s and 1s (and NAs).
+
+    Returns
+    -------
+    var_type : 'numeric', 'categorical', or 'datetime'
+        Name identifying the type of data in the vector.
+    """
+
+    # If a categorical dtype is set, infer categorical
+    if is_categorical_dtype(vector):
+        return VarType("categorical")
+
+    # Special-case all-na data, which is always "numeric"
+    if pd.isna(vector).all():
+        return VarType("numeric")
+
+    # Special-case binary/boolean data, allow caller to determine
+    # This triggers a numpy warning when vector has strings/objects
+    # https://github.com/numpy/numpy/issues/6784
+    # Because we reduce with .all(), we are agnostic about whether the
+    # comparison returns a scalar or vector, so we will ignore the warning.
+    # It triggers a separate DeprecationWarning when the vector has datetimes:
+    # https://github.com/numpy/numpy/issues/13548
+    # This is considered a bug by numpy and will likely go away.
+    with warnings.catch_warnings():
+        warnings.simplefilter(
+            action='ignore',
+            category=(FutureWarning, DeprecationWarning)  # type: ignore  # mypy bug?
+        )
+        if np.isin(vector, [0, 1, np.nan]).all():
+            return VarType(boolean_type)
+
+    # Defer to positive pandas tests
+    if is_numeric_dtype(vector):
+        return VarType("numeric")
+
+    if is_datetime64_dtype(vector):
+        return VarType("datetime")
+
+    # --- If we get to here, we need to check the entries
+
+    # Check for a collection where everything is a number
+
+    def all_numeric(x):
+        for x_i in x:
+            if not isinstance(x_i, Number):
+                return False
+        return True
+
+    if all_numeric(vector):
+        return VarType("numeric")
+
+    # Check for a collection where everything is a datetime
+
+    def all_datetime(x):
+        for x_i in x:
+            if not isinstance(x_i, (datetime, np.datetime64)):
+                return False
+        return True
+
+    if all_datetime(vector):
+        return VarType("datetime")
+
+    # Otherwise, our final fallback is to consider things categorical
+
+    return VarType("categorical")
