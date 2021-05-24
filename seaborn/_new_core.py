@@ -37,6 +37,7 @@ class Plot:
 
     data: PlotData  # TODO possibly should be private?
     layers: list[Layer]  # TODO probably should be private?
+    _mappings: dict[str, SemanticMapping]
 
     def __init__(
         self,
@@ -46,9 +47,14 @@ class Plot:
 
         # Note that we can't assume wide-form here if variables does not contain x or y
         # because those might get assigned in long-form fashion per layer.
+        # TODO I am thinking about just not supporting wide-form data in this interface
+        # and handling the reshaping in the functional interface externally
 
+        # TODO this is just the original source ... prob. not that (externally) useful?
         self.data = PlotData(data, variables)
+
         self.layers = []
+        self._mappings = {}  # TODO initialize with defaults?
 
     def add(
         self,
@@ -69,41 +75,78 @@ class Plot:
 
         return self
 
+    def map_hue(
+        self,
+        palette: Optional[PaletteSpec] = None,
+        order: Optional[list] = None,
+        norm: Optional[Normalize] = None,
+    ) -> Plot:
+
+        # TODO we do some fancy business currently to avoid having to
+        # write these ... do we want that to persist or is it too confusing?
+        # ALSO TODO should these be initialized with defaults?
+        self._mappings["hue"] = HueMapping(palette, order, norm)
+        return self
+
     def plot(self) -> Plot:
+
+        # TODO a rough sketch ...
 
         # TODO one option is to loop over the layers here and use them to
         # initialize and scaling/mapping we need to do (using parameters)
         # possibly previously set and stored through calls to map_hue etc.
+        # Alternately (and probably a better idea), we could concatenate
+        # the layer data and then pass that to the Mapping objects to
+        # set them up. Note that if strings are passed in one layer and
+        # floats in another, this will turn the whole variable into a
+        # categorical. That might make sense but it's different from if you
+        # plot twice once with strings and then once with numbers.
+        # Another option would be to raise if layers have different variable
+        # types (this is basically what ggplot does), but that adds complexity.
+
+        all_data = pd.concat([layer.data.frame for layer in self.layers])
+
+        mappings = {}
+        for var, mapping in self._mappings.items():
+            if var in all_data:  # TODO Define  __contains__ on PlotData?
+                mappings[var] = mapping.train(all_data[var])
 
         # TODO or something like this
         for layer in self.layers:
-            self._plot_layer(layer)
+
+            # TODO alt. assign as attribute on Layer?
+            layer_mappings = {k: v for k, v in mappings.items() if k in layer.data}
+
+            self._plot_layer(layer, layer_mappings)
 
         return self
 
-    def _plot_layer(self, layer):
+    def _plot_layer(self, layer, mappings):
 
-        # Roughly ...
+        df = layer.data.frame
 
         # TODO where does this method come from?
-        data = self.as_numeric(layer.data)
+        # data = self.as_numeric(layer.data)
 
         # TODO who owns the groupby logic?
-        data = self.stat(data)
+        # data = self.stat(data)
 
         # Our statistics happen on the scale we want, but then matplotlib is going
         # to re-handle the scaling, so we need to invert before handing off
         # Note: we don't need to convert back to strings for categories (but we could?)
-        data = self.invert_scale(data)
+        # data = self.invert_scale(data)
 
         # Something like this?
-        layer.mark._plot(data)  # do we pass ax (and/or facets?! here?)
+        layer.mark._plot(df, mappings)  # do we pass ax (and/or facets?! here?)
 
     def show(self) -> Plot:
 
         # TODO guard this here?
         # We could have the option to be totally pyplot free
-        # in which case this method would raise
+        # in which case this method would raise. In this vision, it would
+        # make sense to specify whether or not to use pyplot at the initial Plot().
+        # Keep an eye on whether matplotlib implements "attaching" an existing
+        # figure to pyplot: https://github.com/matplotlib/matplotlib/pull/14024
         import matplotlib.pyplot as plt  # type: ignore
         self.plot()
         plt.show()
@@ -200,7 +243,7 @@ class PlotData:  # TODO better name?
         frame = (
             self.frame
             .drop(columns=drop_cols)
-            .join(new.frame)  # type: ignore  # mypy thinks frame.join is a Series??
+            .join(new.frame, how="outer")
         )
 
         names = {k: v for k, v in self.names.items() if k not in disinherit}
@@ -354,48 +397,13 @@ class Point(Mark):
 
         self.kwargs = kwargs
 
-    def _plot(self, plot):  # TODO data_gen is maybe too restrictive a name?
+    def _plot(self, data, mappings):
 
         kws = self.kwargs.copy()
 
-        for keys, data, ax in plot.data_gen(self.group_vars):
-
-            # Define the vectors of x and y positions
-            empty = np.full(len(data), np.nan)
-            x = data.get("x", empty)
-            y = data.get("y", empty)
-
-            # Set defaults for other visual attributes
-            kws.setdefault("edgecolor", "w")
-
-            if "style" in data:
-                # Use a representative marker so scatter sets the edgecolor
-                # properly for line art markers. We currently enforce either
-                # all or none line art so this works.
-                example_level = self._style_map.levels[0]
-                example_marker = self._style_map(example_level, "marker")
-                kws.setdefault("marker", example_marker)
-
-            # TODO this makes it impossible to vary alpha with hue which might
-            # otherwise be useful? Should we just pass None?
-            kws["alpha"] = 1 if self.alpha == "auto" else self.alpha
-
-            # Draw the scatter plot
-            points = ax.scatter(x=x, y=y, **kws)
-
-            # Apply the mapping from semantic variables to artist attributes
-
-            if "hue" in self.variables:
-                points.set_facecolors(self._hue_map(data["hue"]))
-
-            if "size" in self.variables:
-                points.set_sizes(self._size_map(data["size"]))
-
-            if "style" in self.variables:
-                p = [self._style_map(val, "path") for val in data["style"]]
-                points.set_paths(p)
-
-            # Apply dependant default attributes
+        import matplotlib.pyplot as plt
+        ax = plt.gca()
+        ax.scatter(x=data["x"], y=data["y"], **kws)
 
 
 class Layer:
@@ -413,6 +421,26 @@ class Layer:
 class SemanticMapping:
 
     pass
+
+
+# TODO Currently, the SemanticMapping objects are also the source of the information
+# about the levels/order of the semantic variables. Do we want to decouple that?
+
+# In favor:
+# Sometimes (i.e. categorical plots) we need to know x/y order, and we also need
+# to know facet variable orders, so having a consistent way of defining order
+# across all of the variables would be nice.
+
+# Against:
+# Our current external interface consumes both mapping parameterization like the
+# color palette to use and the order information. I think this makes a fair amount
+# of sense. But we could also break those, e.g. have `scale_fixed("hue", order=...)`
+# similar to what we are currently developing for the x/y. Is is another method call
+# which may be annoying. But then alternately it is maybe more consistent (and would
+# consistently hook into whatever internal representation we'll use for variable order).
+# Also, the parameters of the semantic mapping often implies a particular scale
+# (i.e., providing a palette list forces categorical treatment) so it's not clear
+# that it makes sense to determine that information at different points in time.
 
 
 class HueMapping(SemanticMapping):
@@ -483,6 +511,11 @@ class HueMapping(SemanticMapping):
                     list(data), palette, order,
                 )
 
+            # TODO do we need to return and assign out here or can the
+            # type-specific methods do the assignment internally
+
+            # TODO I don't love how this is kind of a mish-mash of attributes
+            # Can we be more consistent across SemanticMapping subclasses?
             self.map_type = map_type
             self.lookup_table = lookup_table
             self.palette = palette
@@ -605,7 +638,6 @@ class HueMapping(SemanticMapping):
 
 
 # TODO do modern functions ever pass a type other than Series into this?
-# TODO "list" is too strict for order
 def categorical_order(vector: Vector, order: Optional[Vector] = None) -> list:
     """
     Return a list of unique data values using seaborn's ordering rules.
@@ -630,7 +662,6 @@ def categorical_order(vector: Vector, order: Optional[Vector] = None) -> list:
 
         # TODO We don't have Categorical as part of our Vector type
         # Do we really accept it? Is there a situation where we want to?
-        # NOTE: categorical_order gets called on inputs that are NOT meant as data
 
         # if isinstance(vector, pd.Categorical):
         #     order = vector.categories
