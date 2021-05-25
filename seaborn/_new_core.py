@@ -24,7 +24,7 @@ from .utils import (
 )
 
 
-# TODO ndarray can be the numpy ArrayLike on 1.20+ (?)
+# TODO ndarray can be the numpy ArrayLike on 1.20+, which will subsume sequence (?)
 Vector = Union[Series, Index, ndarray, Sequence]
 
 PaletteSpec = Optional[Union[str, list, dict, Colormap]]
@@ -118,10 +118,19 @@ class Plot:
 
         all_data = pd.concat([layer.data.frame for layer in self._layers])
 
+        # TODO This feels messy here. Should be in a separate method. But called here?
+        default_mappings = {  # TODO central source for this!
+            "hue": HueMapping,
+        }
+        for var, mapping in default_mappings.items():
+            if var in all_data and var not in self._mappings:
+                self._mappings[var] = mapping()  # TODO refactor w/above
+
         mappings = {}
         for var, mapping in self._mappings.items():
-            if var in all_data:  # TODO Define  __contains__ on PlotData?
-                mappings[var] = mapping.train(all_data[var])
+            if var in all_data:
+                mapping.train(all_data[var])  # TODO return self?
+                mappings[var] = mapping
 
         # TODO or something like this
         for layer in self._layers:
@@ -224,6 +233,9 @@ class PlotData:  # TODO better name?
         self.frame = frame
         self.names = names
         self._source = data
+
+    def __contains__(self, key: Hashable) -> bool:
+        return key in self.frame
 
     def update(
         # TODO name-wise, does update imply an inplace operation in a confusing way?
@@ -413,9 +425,19 @@ class Point(Mark):
 
         kws = self.kwargs.copy()
 
+        # TODO! Get this from plotter or generator ===
         import matplotlib.pyplot as plt
         ax = plt.gca()
-        ax.scatter(x=data["x"], y=data["y"], **kws)
+        # ===
+
+        # TODO since names match, can probably be automated!
+        if "hue" in data:
+            c = mappings["hue"](data["hue"])
+        else:
+            c = None
+
+        # TODO Not backcompat with allowed (but nonfunctional) univariate plots
+        ax.scatter(x=data["x"], y=data["y"], c=c, **kws)
 
 
 class Layer:
@@ -432,7 +454,15 @@ class Layer:
 
 class SemanticMapping:
 
-    pass
+    def __call__(self, x):  # TODO types; will need to overload (wheee)
+        # TODO this is a hack to get things working
+        # We are missing numeric maps and lots of other things
+        if isinstance(x, pd.Series):
+            if x.dtype.name == "category":  # TODO! possible pandas bug
+                x = x.astype(object)
+            return x.map(self.lookup_table)
+        else:
+            return self.lookup_table[x]
 
 
 # TODO Currently, the SemanticMapping objects are also the source of the information
@@ -484,7 +514,7 @@ class HueMapping(SemanticMapping):
         # TODO these are currently extracted from a passed in plotter instance
         # can we avoid doing that now that we are deferring the mapping?
         input_format: Literal["long", "wide"] = "long"
-        var_type = None
+        var_type = variable_type(data)
 
         if data.notna().any():
 
@@ -513,7 +543,7 @@ class HueMapping(SemanticMapping):
 
             # --- Option 3: datetime mapping
 
-            else:
+            elif map_type == "datetime":
                 # TODO this needs actual implementation
                 cmap = norm = None
                 levels, lookup_table = self.categorical_mapping(
@@ -521,6 +551,9 @@ class HueMapping(SemanticMapping):
                     # pandas and numpy represent datetime64 data
                     list(data), palette, order,
                 )
+
+            else:
+                raise RuntimeError()  # TODO should never get here ...
 
             # TODO do we need to return and assign out here or can the
             # type-specific methods do the assignment internally
