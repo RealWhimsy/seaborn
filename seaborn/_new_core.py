@@ -35,9 +35,9 @@ PaletteSpec = Optional[Union[str, list, dict, Colormap]]
 
 class Plot:
 
-    data: PlotData  # TODO possibly should be private?
-    layers: list[Layer]  # TODO probably should be private?
-    _mappings: dict[str, SemanticMapping]
+    _data: PlotData
+    _layers: list[Layer]
+    _mappings: dict[str, SemanticMapping]  # TODO keys could be Literal
 
     def __init__(
         self,
@@ -50,11 +50,16 @@ class Plot:
         # TODO I am thinking about just not supporting wide-form data in this interface
         # and handling the reshaping in the functional interface externally
 
-        # TODO this is just the original source ... prob. not that (externally) useful?
-        self.data = PlotData(data, variables)
-
-        self.layers = []
+        self._data = PlotData(data, variables)
+        self._layers = []
         self._mappings = {}  # TODO initialize with defaults?
+
+    def on(self) -> Plot:
+
+        # TODO  Provisional name for a method that accepts an existing Axes object,
+        # and possibly one that does all of the figure/subplot configuration
+        raise NotImplementedError()
+        return self
 
     def add(
         self,
@@ -66,12 +71,12 @@ class Plot:
 
         # TODO what if in wide-form mode, we convert to long-form
         # based on the transform that mark defines?
-        layer_data = self.data.update(data, variables)
+        layer_data = self._data.update(data, variables)
 
         if stat is None:
             stat = mark.default_stat
 
-        self.layers.append(Layer(layer_data, mark, stat))
+        self._layers.append(Layer(layer_data, mark, stat))
 
         return self
 
@@ -86,6 +91,13 @@ class Plot:
         # write these ... do we want that to persist or is it too confusing?
         # ALSO TODO should these be initialized with defaults?
         self._mappings["hue"] = HueMapping(palette, order, norm)
+        return self
+
+    def theme(self) -> Plot:
+
+        # TODO We want to be able to use the existing seaborn themeing system
+        # to do plot-specific theming
+        raise NotImplementedError()
         return self
 
     def plot(self) -> Plot:
@@ -104,7 +116,7 @@ class Plot:
         # Another option would be to raise if layers have different variable
         # types (this is basically what ggplot does), but that adds complexity.
 
-        all_data = pd.concat([layer.data.frame for layer in self.layers])
+        all_data = pd.concat([layer.data.frame for layer in self._layers])
 
         mappings = {}
         for var, mapping in self._mappings.items():
@@ -112,7 +124,7 @@ class Plot:
                 mappings[var] = mapping.train(all_data[var])
 
         # TODO or something like this
-        for layer in self.layers:
+        for layer in self._layers:
 
             # TODO alt. assign as attribute on Layer?
             layer_mappings = {k: v for k, v in mappings.items() if k in layer.data}
@@ -214,12 +226,12 @@ class PlotData:  # TODO better name?
         self._source = data
 
     def update(
+        # TODO name-wise, does update imply an inplace operation in a confusing way?
+        # I think yes ... maybe "augment"?
         self,
         data: Optional[DataFrame | Mapping],
         variables: Optional[dict[str, Optional[Hashable | Vector]]],
     ) -> PlotData:
-
-        # TODO name-wise, does update imply an inplace operation in a confusing way?
 
         # TODO Note a tricky thing here which is that often x/y will be inherited
         # meaning that the variable specification here will look like "wide-form"
@@ -455,7 +467,6 @@ class HueMapping(SemanticMapping):
         norm: Optional[Normalize] = None,
     ):
 
-        # TODO these should be "input_palette" or similar
         self._input_palette = palette
         self._input_order = order
         self._input_norm = norm
