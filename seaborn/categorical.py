@@ -37,6 +37,7 @@ __all__ = [
     "stripplot", "swarmplot",
     "boxplot", "violinplot", "boxenplot",
     "pointplot", "barplot", "countplot",
+    "boxplot_from_list"
 ]
 
 
@@ -2212,6 +2213,20 @@ def boxplot(
 
     plotter.plot(ax, kwargs)
     return ax
+
+
+def boxplot_from_list(data):
+    if isinstance(data, list):
+        df = pd.DataFrame(columns=["Data"])
+        for x in data:
+            df = df.append({
+                "Data": x
+            }, ignore_index=True)
+
+    else:
+        raise TypeError("Passed object is not a list.")
+
+    return boxplot(data=df, y="Data")
 
 
 boxplot.__doc__ = dedent("""\
